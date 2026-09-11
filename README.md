@@ -205,18 +205,27 @@ Files are written to the `downloads/` directory, named like
   correct when ffmpeg is absent and nothing can be transcoded.
 - `POST /api/prepare` — takes `{url, mode, format, session, batch, tags, title,
   creator}`, turns it into a yt-dlp command, generates a unique `task_id`, and
-  returns immediately while a background thread does the actual downloading. For
-  audio with ffmpeg it consults the catalog and **defers**: it returns
-  `{task_id, needs_tags, tag_candidates}` (a fallback `creator`/`title` card when
-  nothing matches) and waits for the tags endpoint. Video, playlists, and audio
-  without ffmpeg start immediately.
-- `POST /api/task/<task_id>/tags` — resolves a picked metadata set + album-art choice
-  (`{mode: candidate|keep|skip|manual, tags, art: {type: album|file|video|none, url}}`) and
-  starts the download. `manual` behaves like `candidate`: the `tags` dict
-  (artist/track/album/year/…) is written as-is on top of the native metadata, and the
-  `art` choice applies. For a task that is somehow already running, it restarts it
-  with the new settings (though the UI never produces that case — prepare always
-  defers).
+  returns immediately while a background thread does the actual downloading. Audio
+  downloads **start immediately** with the video's own metadata +
+  `tags_mode="keep"`. There is no pre-download tag selection anymore; song tags are
+  applied *after* the file exists (see *Song tags and album art*).
+- `POST /api/task/<task_id>/tags` — legacy pre-download endpoint: resolves a picked
+  metadata set + album-art choice (`{mode: candidate|keep|skip|manual, tags, art:
+  {type: album|file|video|none, url}}`) and starts the download. Only exercised by
+  the old deferred flow; the current UI routes its picker through `/retag` instead.
+- `GET /api/task/<task_id>/candidates?session=...` — returns a fresh ranked
+  candidate list for a **finished** audio task (Auth + `X-Requested-With` +
+  owning-session + finished-task guards), built live from the stashed
+  `FINISHED_META[task_id]` `{title, creator}`. Used by the after-download result
+  picker.
+- `POST /api/task/<task_id>/retag` — the after-download tag editor. Same body shape
+  and guards as `/tags`, but it targets the **finished file**: rewrites the
+  embedded tags + artwork in place via mutagen (no re-download, filename
+  unchanged). Returns `{ok, changed, tags, tags_mode, artwork, cover}` so the UI
+  re-renders the result card or playlist row. `mode: "skip"` leaves everything
+  untouched; `mode: "keep"` with no tags/art change is a no-op; art `type: "none"`
+  strips embedded artwork (`\x00remove` sentinel); `"file"` reuses the uploaded
+  canonical cover, `"album"` fetches official art into the transient slot.
 - `GET /api/task/<task_id>?session=...` — the client **polls** this for live status.
   It returns the latest notified event + a snapshot:
   `{status: pending|running|ready|failed, event, data}` where `data` holds the
@@ -237,47 +246,45 @@ Files are written to the `downloads/` directory, named like
 
 ### Song tags and album art
 
-For audio downloads, the server matches the video title against the iTunes and
-Deezer catalogs **in parallel** (at `POST /api/prepare`, not at fetch time),
-normalizing punctuation and scoring with token/word overlap. The result is always a
-ranked candidate list (score, source, tags, artwork) of **up to 10 cards** shown in a
-swipeable card carousel (arrow buttons + scroll-snap) on the picker's own optional
-step, and the picker never auto-downloads — the download waits for a choice:
+For audio downloads the file **always starts with the video's own native metadata**
+(no catalog lookup blocks the download), whether single or a playlist batch, and
+presents an **Edit tags** button on the finished result card (and per finished
+playlist row).
 
-- score ≥ 0.82 → *auto*: the top candidate is highlighted as the suggested choice.
-- score 0.40–0.82 → *review*: the top candidate is still highlighted, but the other
-  cards are more likely to be the right answer, so switching is common.
-- no usable match → a synthesized fallback card (`artist=creator`, `track=title`)
-  is the preselected winner, so the flow is identical.
+When the user clicks *Edit tags* — on the single result card or per row in a
+playlist — the server runs a **fresh** catalog lookup against the stashed
+`{title, creator}` (`GET /api/task/<task_id>/candidates`, auth + XHR + session +
+finished-task guards) and opens the same tag picker in *retag mode*. The picker
+layout is unchanged (Match / Manual tabs, album art / video thumb / no art / upload
+image); button labels switch to **Apply tags to file** / **Apply my tags** / **Keep
+current tags**; *← Cancel* just returns to the result without touching the file.
 
-A pick goes through the tags endpoint (see *Request flow*); because prepare
-defers, the endpoint *starts* the download. The step is split into a **Match** tab
-(sends `mode: candidate` with the currently selected card + art), a **Manual** tab
-(`mode: manual` — an inline artist/title/album/year form; one pane collapses when
-the other is selected; cover art is either the video thumbnail or an image the user
-uploads to `/api/art-local` and sends as `art.type: "file"`), a **Skip** section
-(`mode: keep` — embeds the video's own metadata and
-thumbnail, no catalog lookup needed), and **← Cancel** (deletes the deferred task
-and returns to Configure). Its running-task restart path (terminate the old yt-dlp
-process, clear on-disk files, re-run) still exists server-side for robustness, but
-the UI never needs it: the download only begins after a choice.
+A pick goes to `POST /api/task/<task_id>/retag` (same body shape as `/tags`:
+`{mode: candidate|manual|keep|skip, tags, art: {type, url}}`). The endpoint
+rewrites the tags + artwork **in place** via mutagen (mp3/m4a/mp4/flac/ogg/opus,
+works with or without ffmpeg; filename unchanged). `mode: "skip"` closes the
+picker without writing; `"none"` art strips embedded artwork; `"file"` reuses the
+uploaded cover; `"album"` fetches official art into the transient slot. The
+response (`{ok, changed, tags, tags_mode, artwork, cover}`) re-renders the result
+card (single) or playlist row in place.
 
 Album art comes from the **catalog** (iTunes `600x600bb`; Deezer `cover_xl` down to
-`cover_medium`), not from the video. When official art is available the app fetches
-it server-side (`fetch_artwork` in `downloader.py` — size-capped, only `image/*`, and
-magic-byte sniffed) to `downloads/<task_id>_cover.jpg` and attaches it after the
-download finishes: mp3 and the mp4-family get an `attached_pic` stream via ffmpeg;
-flac/ogg/opus get a `Picture`/`METADATA_BLOCK_PICTURE` block via mutagen. The temp
-file is atomically swapped in and the cover file is always deleted afterwards. If no
-official art is available or the user picks "video", the video thumbnail is embedded
-instead; "no art" skips embedded artwork entirely. On the **Manual** tab the cover
-can also be **your own image**: the client uploads it to `POST /api/art-local` (8 MB
-cap, magic-byte sniffed, session/XHR-guarded) and sends `art.type: "file"`; the
-uploaded cover is served back at `GET /api/art-local/<task_id>` and kept until the
-task is deleted so the result card can show it. The `ready` event carries the
-`artwork` URL plus `cover` (`art`/`video`/`none`) and `tags` + `tags_mode`
-(`candidate`/`manual`/`keep`/`skip`), so the result card can show the cover and the embedded
-song tags (or fall back to the video thumbnail and uploader/title for context).
+`cover_medium`), not from the video. During the initial download, the video
+thumbnail is always embedded as the fallback. When official art is available the
+`Edit tags` picker fetches it server-side (`fetch_artwork` in `downloader.py` —
+size-capped, only `image/*`, magic-byte sniffed) and embeds it via ffmpeg
+(mp3/mp4-family) or mutagen (flac/ogg/opus). The temp file is atomically swapped
+in and the cover file is always deleted afterwards. If no official art is available
+or the user picks "video", the video thumbnail stays; "no art" strips it. On the
+**Manual** tab the cover can also be **your own image**: the client uploads it to
+`POST /api/art-local` (8 MB cap, magic-byte sniffed, session/XHR-guarded) and sends
+`art.type: "file"`; the uploaded cover is served back at
+`GET /api/art-local/<task_id>` and kept until the task is deleted so the result
+card can show it. The `ready` event carries the `artwork` URL plus `cover`
+(`art`/`video`/`none`) and `tags` + `tags_mode`
+(`candidate`/`manual`/`keep`/`skip`), so the result card can show the cover and
+any embedded song tags (or fall back to the video thumbnail and uploader/title for
+context).
 
 Tags are written by yt-dlp's `--embed-metadata` with `--parse-metadata` literal
 overrides for the matched fields. The `year` matches the release year in the `date`

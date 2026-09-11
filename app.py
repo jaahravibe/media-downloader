@@ -19,6 +19,7 @@ SSE_CLIENTS = {}
 SSE_LATEST = {}
 TASKS = {}
 FILE_STATE = {}
+FINISHED_META = {}
 SESSION_TASKS = {}
 STATE_LOCK = threading.Lock()
 
@@ -99,6 +100,7 @@ def _delete_task_file(task_id):
             pass
         FILE_STATE.pop(task_id, None)
         SSE_LATEST.pop(task_id, None)
+        FINISHED_META.pop(task_id, None)
         for sess in SESSION_TASKS.values():
             if task_id in sess:
                 sess.remove(task_id)
@@ -139,6 +141,18 @@ def _format_candidates(cands):
         }
         for c in cands
     ]
+
+
+def _clean_tag(v):
+    """Normalize a user/catalog-supplied tag value or blank it.
+
+    yt-dlp and some catalogs use "NA"-like sentinels for missing metadata;
+    treat them as blank so a real name wins.
+    """
+    s = str(v or "").strip()
+    if s.lower() in ("na", "n/a", "n\\a", "unknown", "-"):
+        return ""
+    return s
 
 
 def _gen_is_current(task_id, gen):
@@ -243,6 +257,130 @@ def _embed_cover(task_id, media):
         return False
 
 
+def _write_tags(task_id, media, overrides, cover_path=None):
+    """Write a finished media file's song tags (+ optional artwork) in place.
+
+    Uses mutagen for every supported container (mp3 / m4a / mp4 / flac / ogg /
+    opus) so it works whether or not ffmpeg is installed. Non-fatal by
+    contract: any failure leaves the file untouched. Returns True on success.
+
+    cover_path: path to artwork to embed, or the sentinel "\x00remove" to
+    strip existing artwork, or None to leave artwork untouched.
+    """
+    if not overrides and cover_path is None:
+        return False
+    if not media or not os.path.isfile(media):
+        return False
+    remove_art = cover_path == "\x00remove"
+    ext = os.path.splitext(media)[1].lstrip(".").lower()
+    year = _clean_tag(overrides.get("year") or "") if overrides else ""
+    try:
+        if ext in ("mp3",):
+            from mutagen.id3 import ID3, TIT2, TPE1, TALB, TYER, TDRC
+            try:
+                tags = ID3(media)
+            except Exception:
+                from mutagen.id3 import ID3NoHeaderError
+                tags = ID3()
+            if overrides:
+                for key, frame_cls in (("track", TIT2), ("artist", TPE1), ("album", TALB)):
+                    v = _clean_tag(overrides.get(key) or "")
+                    if v:
+                        tags.delall(frame_cls.__name__)
+                        tags.add(frame_cls(encoding=3, text=[v]))
+                if year:
+                    if tags.version >= (2, 4):
+                        tags.delall("TDRC")
+                        tags.add(TDRC(encoding=3, text=[year]))
+                    else:
+                        tags.delall("TYER")
+                        tags.add(TYER(encoding=3, text=[year]))
+            if remove_art:
+                tags.delall("APIC")
+            elif cover_path and os.path.exists(cover_path):
+                from mutagen.id3 import APIC
+                with open(cover_path, "rb") as f:
+                    cover_bytes = f.read()
+                with open(cover_path, "rb") as f:
+                    mime = "image/" + (downloader.sniff_image(f.read(32)) or "jpg")
+                tags.delall("APIC")
+                tags.add(APIC(encoding=3, mime=mime, type=3, desc="Cover", data=cover_bytes))
+            tags.save(media)
+        elif ext in ("m4a", "mp4", "m4v", "mov"):
+            from mutagen.mp4 import MP4, MP4Cover
+            tags = MP4(media)
+            mapping = {
+                "artist": "\xa9ART",
+                "album": "\xa9alb",
+                "track": "\xa9nam",
+            }
+            for key, atom in mapping.items():
+                v = _clean_tag(overrides.get(key) or "")
+                if v:
+                    tags[atom] = [v]
+            if year:
+                tags["\xa9day"] = [year]
+            tags.pop("covr", None)
+            if cover_path and os.path.exists(cover_path):
+                with open(cover_path, "rb") as f:
+                    tags["covr"] = [MP4Cover(f.read(), imageformat=MP4Cover.FORMAT_JPEG)]
+            tags.save(media)
+        elif ext == "flac":
+            from mutagen.flac import FLAC, Picture
+            tags = FLAC(media)
+            if overrides:
+                for key in ("artist", "album", "track", "year"):
+                    v = _clean_tag(overrides.get(key) or "")
+                    if v:
+                        tags[key] = [v]
+            tags.clear_pictures()
+            if cover_path and os.path.exists(cover_path):
+                with open(cover_path, "rb") as f:
+                    data = f.read()
+                pic = Picture()
+                pic.type = 3
+                pic.mime = "image/" + (downloader.sniff_image(data[:32]) or "jpg")
+                pic.data = data
+                w, h = _pic_dims(cover_path)
+                if w:
+                    pic.width, pic.height = w, h
+                tags.add_picture(pic)
+            tags.save(media)
+        elif ext in ("ogg", "opus"):
+            if ext == "opus":
+                from mutagen.oggopus import OggOpus
+                tags = OggOpus(media)
+            else:
+                from mutagen.oggvorbis import OggVorbis
+                tags = OggVorbis(media)
+            if overrides:
+                for key in ("artist", "album", "track", "year"):
+                    v = _clean_tag(overrides.get(key) or "")
+                    if v:
+                        tags[key] = [v]
+            tags.pop("METADATA_BLOCK_PICTURE", None)
+            if cover_path and os.path.exists(cover_path):
+                from mutagen.flac import Picture
+                with open(cover_path, "rb") as f:
+                    data = f.read()
+                pic = Picture()
+                pic.type = 3
+                pic.mime = "image/" + (downloader.sniff_image(data[:32]) or "jpg")
+                pic.data = data
+                w, h = _pic_dims(cover_path)
+                if w:
+                    pic.width, pic.height = w, h
+                tags["METADATA_BLOCK_PICTURE"] = (
+                    base64.b64encode(pic.write()).decode("ascii")
+                )
+            tags.save(media)
+        else:
+            return False
+        return True
+    except Exception:
+        return False
+
+
 def _clear_cover(task_id):
     """Delete the task's fetched cover file and forget it.
 
@@ -285,6 +423,28 @@ def _set_cover_uploaded(task_id, flag):
         entry = TASKS.get(task_id)
         if isinstance(entry, dict):
             entry["_cover_uploaded"] = bool(flag)
+
+
+def _finished_media(task_id):
+    """Return the finished media file path for a completed task, or None."""
+    try:
+        names = os.listdir(downloader.DOWNLOAD_DIR)
+    except OSError:
+        return None
+    cands = []
+    for n in names:
+        if not n.startswith(task_id + "_"):
+            continue
+        if n.endswith((".part", ".covertmp", ".tmp", ".webp", ".png", ".jpg",
+                       ".jpeg", ".gif", ".info.json")):
+            continue
+        p = os.path.join(downloader.DOWNLOAD_DIR, n)
+        if os.path.isfile(p):
+            cands.append(p)
+    if not cands:
+        return None
+    cands.sort(key=os.path.getsize, reverse=True)
+    return cands[0]
 
 
 def _extract_ytdlp_error(err_lines, out_lines):
@@ -598,40 +758,19 @@ def api_prepare():
                 "bestaudio/best"
             )
 
-    embed_tags = bool(data.get("tags", True))
+    embed_tags = bool(data.get("tags"))
     if mode != "audio" or not downloader.get_ffmpeg_available():
         embed_tags = False
 
+    # All audio downloads keep the video's own metadata + video thumbnail
+    # (tag_mode "keep"). Song tags and album art are applied afterwards via
+    # the post-download retag flow, never block the download.
+    tag_mode = "keep" if embed_tags else None
     tag_overrides = None
     tag_candidates = []
     artwork_url = ""
     cover_path = None
     cover = "video"
-
-    if embed_tags:
-        pic_title = str(data.get("title") or "").strip()[:300]
-        creator = str(data.get("creator") or "").strip()[:200]
-        result = downloader.lookup_song_info(pic_title, creator)
-        candidates = result.get("candidates") or []
-        if not candidates:
-            # No usable catalog hit: synthesize a fallback card so the picker
-            # always has content; the winner is uploader + title.
-            candidates = [{
-                "tags": {"artist": creator, "track": pic_title},
-                "source": "Video title",
-                "score": 1.0,
-                "artwork": "",
-            }]
-        if batch:
-            best = candidates[0]
-            tag_overrides = best["tags"]
-            artwork_url = best.get("artwork") or ""
-            if artwork_url:
-                cover_path = _fetch_cover(task_id, artwork_url)
-                if cover_path:
-                    cover = "art"
-        else:
-            tag_candidates = _format_candidates(candidates)
 
     cmd = downloader.build_download_command(
         url, format_spec, output_tpl, task_id, audio_convert,
@@ -653,7 +792,7 @@ def api_prepare():
             "artwork": artwork_url,
             "cover": cover,
             "tags": tag_overrides if batch else None,
-            "tags_mode": "auto" if (batch and tag_overrides) else None,
+            "tags_mode": tag_mode if batch else None,
             "_title": str(data.get("title") or "").strip()[:300],
             "_creator": str(data.get("creator") or "").strip()[:200],
         }
@@ -748,6 +887,10 @@ def _run_download(task_id, cmd, gen=0):
                 artwork = tentry.get("artwork") or ""
                 tags = tentry.get("tags")
                 tags_mode = tentry.get("tags_mode")
+                FINISHED_META[task_id] = {
+                    "title": tentry.get("_title") or "",
+                    "creator": tentry.get("_creator") or "",
+                }
             notify(task_id, "ready", {
                 "status": "ready",
                 "filename": files[0],
@@ -1011,14 +1154,6 @@ def api_task_tags(task_id):
             info_title = str(entry.get("_title") or "").strip()
             info_creator = str(entry.get("_creator") or "").strip()
 
-            def _clean_tag(v):
-                s = str(v or "").strip()
-                # yt-dlp and some catalogs use "NA"-like sentinels for missing
-                # metadata; treat them as blank so a real name wins.
-                if s.lower() in ("na", "n/a", "n\\a", "unknown", "-"):
-                    return ""
-                return s
-
             for k, v in data["tags"].items():
                 if k not in downloader.ALLOWED_TAG_KEYS:
                     # Never let a client field name reach --parse-metadata.
@@ -1104,6 +1239,147 @@ def api_task_tags(task_id):
         entry["tags_mode"] = mode
     _spawn_download(task_id)
     return jsonify({"task_id": task_id, "started": True})
+
+
+@app.route("/api/task/<task_id>/candidates", methods=["GET"])
+def api_task_candidates(task_id):
+    """Return tag candidates for a finished task (for the after-download picker)."""
+    if not task_id or not task_id.isalnum():
+        return jsonify({"error": "Bad task id"}), 400
+    denied = _require_auth()
+    if denied:
+        return denied
+    if request.headers.get("X-Requested-With") != "XMLHttpRequest":
+        return jsonify({"error": "Forbidden"}), 403
+    session = (request.args.get("session") or "").strip()[:64]
+    if not session:
+        return jsonify({"error": "Session required"}), 403
+    with STATE_LOCK:
+        owned = task_id in SESSION_TASKS.get(session, [])
+        finished = FILE_STATE.get(task_id)
+    if not owned:
+        return jsonify({"error": "Not your task"}), 403
+    if not finished:
+        return jsonify({"error": "Task not finished yet"}), 400
+    meta = FINISHED_META.get(task_id) or {}
+    title = meta.get("title") or ""
+    creator = meta.get("creator") or ""
+    if not title:
+        # Task finished before FINISHED_META existed (migrated code); try
+        # to find a finished file and return an empty set gracefully.
+        return jsonify({"candidates": []})
+    result = downloader.lookup_song_info(title, creator)
+    candidates = result.get("candidates") or []
+    if not candidates:
+        candidates = [{
+            "tags": {"artist": creator, "track": title},
+            "source": "Video title",
+            "score": 1.0,
+            "artwork": "",
+        }]
+    return jsonify({"candidates": _format_candidates(candidates)})
+
+
+@app.route("/api/task/<task_id>/retag", methods=["POST"])
+def api_task_retag(task_id):
+    """Rewrite tags + artwork on a finished file (no re-download).
+
+    Body: same shape as /api/task/<id>/tags:
+        {"mode":"candidate","tags":{...},"art":{type,url}} or
+        {"mode":"manual","tags":{...},"art":{type,url}} or
+        {"mode":"keep"} (leave existing tags, optionally update art) or
+        {"mode":"skip"} (leave everything untouched).
+    """
+    if not task_id or not task_id.isalnum():
+        return jsonify({"error": "Bad task id"}), 400
+    denied = _require_auth()
+    if denied:
+        return denied
+    if request.headers.get("X-Requested-With") != "XMLHttpRequest":
+        return jsonify({"error": "Forbidden"}), 403
+    session = (request.args.get("session") or "").strip()[:64]
+    if not session:
+        return jsonify({"error": "Session required"}), 403
+    with STATE_LOCK:
+        owned = task_id in SESSION_TASKS.get(session, [])
+        finished = FILE_STATE.get(task_id)
+    if not owned:
+        return jsonify({"error": "Not your task"}), 403
+    if not finished:
+        return jsonify({"error": "Task not finished yet"}), 400
+
+    media = _finished_media(task_id)
+    if not media:
+        return jsonify({"error": "No finished file found"}), 400
+
+    data = request.get_json(force=True, silent=True) or {}
+    mode = (data.get("mode") or "keep").strip()
+
+    meta = FINISHED_META.get(task_id) or {}
+    info_title = meta.get("title") or ""
+    info_creator = meta.get("creator") or ""
+
+    overrides = {}
+    if mode in ("candidate", "manual") and isinstance(data.get("tags"), dict):
+        for k, v in data["tags"].items():
+            if k not in downloader.ALLOWED_TAG_KEYS:
+                continue
+            if not isinstance(v, (str, int)):
+                continue
+            s = _clean_tag(v)
+            if not s:
+                if k == "artist":
+                    s = info_creator or "Unknown Artist"
+                elif k == "track":
+                    s = info_title or "Unknown Track"
+                else:
+                    continue
+            overrides[k] = s
+
+    cover_path = None
+    artwork_url = ""
+    cover = "video"
+    art = data.get("art") if isinstance(data.get("art"), dict) else {}
+    art_type = art.get("type")
+    if art_type not in ("album", "video", "none", "file"):
+        art_type = "video"
+    art_url = (art.get("url") or "").strip()
+    if art_type == "album" and downloader.is_safe_url(art_url):
+        _clear_cover(task_id)
+        cover_path = _fetch_cover(task_id, art_url)
+        if cover_path:
+            cover = "art"
+            artwork_url = art_url
+    elif art_type == "file":
+        local = _existing_cover(task_id)
+        if local:
+            cover_path = local
+            cover = "art"
+            artwork_url = f"/api/art-local/{task_id}"
+    elif art_type == "none":
+        cover = "none"
+        # Strip existing artwork by writing to a special sentinel; _write_tags
+        # treats cover_path == "\x00remove" as "delete all pictures".
+        cover_path = "\x00remove"
+
+    # For "skip" mode, leave everything untouched; for "keep" with no
+    # meaningful art change, skip the write.
+    if mode == "skip":
+        _clear_cover(task_id)
+        return jsonify({"ok": True, "changed": False,
+                        "tags": {}, "tags_mode": "keep",
+                        "artwork": "", "cover": "video"})
+    if mode == "keep" and not overrides and not cover_path:
+        _clear_cover(task_id)
+        return jsonify({"ok": True, "changed": False,
+                        "tags": {}, "tags_mode": "keep",
+                        "artwork": artwork_url, "cover": cover})
+
+    ok = _write_tags(task_id, media, overrides or None, cover_path)
+    _clear_cover(task_id)
+    return jsonify({"ok": ok, "changed": True,
+                    "tags": overrides or {}, "tags_mode": mode,
+                    "artwork": artwork_url, "cover": cover})
 
 
 if __name__ == "__main__":

@@ -331,7 +331,6 @@ button:disabled{cursor:not-allowed}
         <div class="vmeta" id="metaLine"></div>
       </div>
     </div>
-    <button class="btn btn-primary prepare-btn" id="prepareBtn" onclick="prepareVideo()">Start download</button>
   </div>
 
     <!-- Shared quality section -->
@@ -347,6 +346,7 @@ button:disabled{cursor:not-allowed}
     <div class="qlist-wrap hidden" id="qlistWrap">
       <div class="qlist" id="formatList"></div>
     </div>
+    <button class="btn btn-primary prepare-btn hidden" id="prepareBtn" onclick="prepareVideo()">Prepare download</button>
 
     <!-- Playlist card -->
     <div class="card hidden" id="playlistCard">
@@ -459,6 +459,7 @@ button:disabled{cursor:not-allowed}
       <div class="preview-fallback" id="previewFallback">▶ This format can’t be previewed in the browser — download instead.</div>
       <div class="result-actions">
         <a class="btn btn-success" id="downloadBtn" download><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3v12"/><path d="m6 9 6 6 6-6"/><path d="M4 19h16"/></svg> Save to device</a>
+        <button class="btn btn-ghost hidden" id="editTagsBtn" onclick="editTagsForResult()">Edit tags</button>
         <button class="btn btn-ghost" id="fetchAnotherBtn" onclick="goImport()">Fetch another</button>
       </div>
     </div>
@@ -478,6 +479,8 @@ let tagCands = [];
 let serverFormats = null;
 let selCand = -1;
 let selArt = {type:'video', url:''};
+let retagTaskId = null;
+let lastReadyData = null;
 let progressListeners = {};
 let busyDownload = false;
 let prepareFailures = [];
@@ -667,6 +670,7 @@ function showInfo(info){
   $('urlPill').title = u;
   setScreen('screenConfigure');
   $('infoCard').classList.remove('hidden');
+  $('prepareBtn').classList.remove('hidden');
   $('playlistCard').classList.add('hidden');
   $('thumb').src = info.thumbnail || '';
   $('title').textContent = info.title || 'Untitled';
@@ -816,7 +820,7 @@ function setBusy(on){
 }
 function setPrepareBtn(on, txt){
   $('prepareBtn').disabled = on;
-  $('prepareBtn').innerHTML = on ? '<span class="spinner"></span> '+txt : 'Start download';
+  $('prepareBtn').innerHTML = on ? '<span class="spinner"></span> '+txt : 'Prepare download';
   if(on) $('retryBtn').classList.add('hidden');
   setBusy(on);
 }
@@ -864,19 +868,17 @@ async function prepareVideo(){
     const data = await res.json();
     if(!res.ok || data.error){
       showFeedback(data.error || ('Request failed ('+res.status+')'), 'error');
-      setPrepareBtn(false, 'Start download');
+      setPrepareBtn(false, 'Prepare download');
       return;
     }
     pendingTaskIds = [data.task_id];
-    if(data.needs_tags){
-      enterTags(data.task_id, data.tag_candidates || []);
-      return;
-    }
+    pendingTaskId = data.task_id;
+    retagTaskId = null;
     setScreen('screenResult');
     listenProgress(data.task_id);
   }catch(e){
     showFeedback('Network error: '+((e&&e.message)||e), 'error');
-    setPrepareBtn(false, 'Start download');
+    setPrepareBtn(false, 'Prepare download');
   }
 }
 
@@ -906,7 +908,8 @@ async function startWithSelection(taskId, fresh){
   }
   syncArtSeg();
 
-  return await postAndListen(taskId, {mode:'candidate', tags:cur.tags || {}, art: selArt});
+  const body = {mode:'candidate', tags:cur.tags || {}, art: selArt};
+  return retagTaskId ? await applyRetag(taskId, body) : await postAndListen(taskId, body);
 }
 
 async function postAndListen(taskId, body){
@@ -922,7 +925,7 @@ async function postAndListen(taskId, body){
     }
   }catch(e){
     showFeedback('Could not start: '+((e&&e.message)||e), 'error');
-    setPrepareBtn(false, 'Start download');
+    setPrepareBtn(false, 'Prepare download');
     return false;
   }
   $('tagCard').classList.add('hidden');
@@ -931,15 +934,70 @@ async function postAndListen(taskId, body){
   return true;
 }
 
+/* ---------- Retag a finished file (after-download tag editor) ---------- */
+async function applyRetag(taskId, body){
+  try{
+    const res = await apiFetch('/api/task/'+taskId+'/retag?session='+encodeURIComponent(getSession()), {
+      method:'POST',
+      headers:{'Content-Type':'application/json','X-Requested-With':'XMLHttpRequest'},
+      body: JSON.stringify(body),
+    });
+    const data = await res.json();
+    if(!res.ok || data.error){
+      throw new Error(data.error || ('Request failed ('+res.status+')'));
+    }
+    const d = data || {};
+    closeTagPicker();
+    if(currentPlaylist){
+      // Playlist result list: update the row's ready payload and re-render.
+      const row = preparedResults.find(r => r.taskId === taskId);
+      if(row && row.ready){
+        row.ready.tags = d.tags || {};
+        row.ready.tags_mode = d.tags_mode || 'candidate';
+        if(d.artwork) row.ready.artwork = d.artwork;
+        if(d.cover) row.ready.cover = d.cover;
+      }
+      setScreen('screenConfigure');
+      renderPlaylistResult();
+      showFeedback('Tags applied to #' + (row ? row.index : taskId) + '.');
+      return true;
+    }
+    setScreen('screenResult');
+    if(lastReadyData){
+      lastReadyData.tags = d.tags || {};
+      lastReadyData.tags_mode = d.tags_mode || 'candidate';
+      if(d.artwork) lastReadyData.artwork = d.artwork;
+      if(d.cover) lastReadyData.cover = d.cover;
+      showReady(lastReadyData);
+    }
+    showFeedback('Tags applied to the file.');
+    return true;
+  }catch(e){
+    showFeedback('Could not apply tags: '+((e&&e.message)||e), 'error');
+    return false;
+  }
+}
+function refreshResultAfterTags(){
+  closeTagPicker();
+  if(currentPlaylist){
+    setScreen('screenConfigure');
+    renderPlaylistResult();
+    return;
+  }
+  setScreen('screenResult');
+  if(lastReadyData) showReady(lastReadyData);
+}
+
 /* ---------- Optional tags & art step (audio with ffmpeg) ---------- */
 function setTagsBusy(on){
   ['tagStartBtn','tagSkipBtn','tagCancelBtn','manualSubmitBtn','tabMatch','tabManual'].forEach(id=>{ $(id).disabled = on; });
   document.querySelectorAll('#manualArtSeg button').forEach(b=>{ b.disabled = on; });
   $('coverFile').disabled = on;
 }
-function enterTags(taskId, cands){
+function enterTags(taskId, cands, retag){
   pendingTaskId = taskId;
-  selArt = {type:'video', url:''};
+  retagTaskId = retag ? taskId : null;
+  selArt = retag ? {type:'album', url:''} : {type:'video', url:''};
   $('coverFile').value = '';
   $('coverPreview').classList.add('hidden');
   $('coverPreview').removeAttribute('src');
@@ -948,9 +1006,31 @@ function enterTags(taskId, cands){
   syncManualArt();
   setTagsBusy(false);
   $('tagCancelBtn').classList.remove('hidden');
+  $('tagStartBtn').textContent = retag ? 'Apply tags to file' : 'Download with this match';
+  $('manualSubmitBtn').textContent = retag ? 'Apply my tags' : 'Download with my tags';
+  $('tagSkipBtn').textContent = retag ? 'Keep current tags' : 'Skip tags &amp; download';
   tagPane('match');
   setScreen('screenTags');
   openPicker(cands);
+}
+function closeTagPicker(){
+  retagTaskId = null;
+  setTagsBusy(false);
+  $('tagCancelBtn').classList.add('hidden');
+  tagPane('match');
+  $('tagCard').classList.add('hidden');
+}
+async function editTagsForResult(){
+  const taskId = pendingTaskId || (pendingTaskIds[0]);
+  if(!taskId) return;
+  try{
+    const res = await apiFetch('/api/task/'+taskId+'/candidates?session='+encodeURIComponent(getSession()), {method:'GET', headers:{'X-Requested-With':'XMLHttpRequest'}});
+    const data = await res.json();
+    if(!res.ok || data.error) throw new Error(data.error || ('Request failed ('+res.status+')'));
+    enterTags(taskId, data.candidates || [], true);
+  }catch(e){
+    showFeedback('Could not load tag candidates: '+((e&&e.message)||e), 'error');
+  }
 }
 async function tagsStart(){
   const taskId = pendingTaskId;
@@ -963,6 +1043,11 @@ async function tagsStart(){
 async function tagsSkip(){
   const taskId = pendingTaskId;
   if(!taskId) return;
+  if(retagTaskId){
+    closeTagPicker();
+    refreshResultAfterTags();
+    return;
+  }
   setTagsBusy(true);
   const ok = await postAndListen(taskId, {mode:'keep'});
   if(!ok) setTagsBusy(false);
@@ -970,17 +1055,30 @@ async function tagsSkip(){
 async function tagsCancel(){
   const taskId = pendingTaskId;
   pendingTaskId = null;
-  if(taskId){
+  pendingTaskIds = pendingTaskIds.filter(t=>t!==taskId);
+  const wasRetag = !!retagTaskId;
+  retagTaskId = null;
+  if(!wasRetag && taskId){
+    // Only a deferred (pre-download) task is deleted on cancel; a retag picker
+    // does not own the finished file.
     try{
       await apiFetch('/api/task/'+taskId+'?session='+encodeURIComponent(getSession()), {method:'DELETE', headers:{'X-Requested-With':'XMLHttpRequest'}});
     }catch(_){}
-    pendingTaskIds = pendingTaskIds.filter(t=>t!==taskId);
   }
   setTagsBusy(false);
   $('tagCancelBtn').classList.add('hidden');
   tagPane('match');
-  setPrepareBtn(false, 'Start download');
-  setScreen('screenConfigure');
+  setPrepareBtn(false, 'Prepare download');
+  if(wasRetag){
+    if(currentPlaylist){
+      setScreen('screenConfigure');
+      renderPlaylistResult();
+    }else{
+      setScreen('screenResult');
+    }
+  }else{
+    setScreen('screenConfigure');
+  }
 }
 
 function tagPane(which){
@@ -1094,7 +1192,9 @@ async function tagsManualSubmit(){
     return;
   }
   setTagsBusy(true);
-  const ok = await postAndListen(taskId, {mode:'manual', tags: tags, art: art});
+  const ok = retagTaskId
+    ? await applyRetag(taskId, {mode:'manual', tags: tags, art: art})
+    : await postAndListen(taskId, {mode:'manual', tags: tags, art: art});
   if(!ok) setTagsBusy(false);
 }
 
@@ -1121,7 +1221,7 @@ function listenProgress(taskId){
     text.textContent = msg;
     text.className = 'progress-text error';
     $('retryBtn').classList.remove('hidden');
-    setPrepareBtn(false, 'Start download');
+    setPrepareBtn(false, 'Prepare download');
     $('tagCard').classList.add('hidden');
   }
 
@@ -1182,7 +1282,7 @@ function listenProgress(taskId){
       fill.style.width = '100%';
       text.textContent = 'Done!';
       text.className = 'progress-text success';
-      setPrepareBtn(false, 'Start download');
+      setPrepareBtn(false, 'Prepare download');
       $('tagCard').classList.add('hidden');
       showReady(d);
       return;
@@ -1296,6 +1396,7 @@ function artThumb(url){
 /* ---------- Ready / preview ---------- */
 function showReady(d){
   hasPreparedFile = true;
+  lastReadyData = d;
   setScreen('screenResult');
   $('dlContext').classList.add('hidden');
   $('progressWrap').classList.add('hidden');
@@ -1307,6 +1408,7 @@ function showReady(d){
   const isAudio = audioExts.indexOf(ext) !== -1;
   $('resultName').textContent = fileName;
   $('resultSize').textContent = (d.size ? formatSize(d.size) : (d.ext || '').toUpperCase());
+  $('editTagsBtn').classList.toggle('hidden', !isAudio);
   const dl = $('downloadBtn');
   dl.href = d.file_url + authQuery(false);
   dl.setAttribute('download', fileName);
@@ -1448,6 +1550,7 @@ function showPlaylist(url, data){
   setScreen('screenConfigure');
   $('tagCard').classList.add('hidden');
   $('infoCard').classList.add('hidden');
+  $('prepareBtn').classList.add('hidden');
   $('playlistCard').classList.remove('hidden');
   populateFormats();
   $('playlistTitle').textContent = data.title || 'Playlist';
@@ -1554,7 +1657,7 @@ async function processQueue(){
           }
         });
       if(out && out.ok){
-        preparedResults.push({index: entry.index, title: entry.title, ready: out.data || {}});
+        preparedResults.push({index: entry.index, title: entry.title, taskId: data.task_id, ready: out.data || {}});
       }else if(out){
         prepareFailures.push({title: entry.title, error: out.error || 'preparation failed'});
       }
@@ -1714,6 +1817,9 @@ function renderPlaylistResult(){
     const playBtn = isAudio
       ? '<button type="button" class="pl-play" data-preview-url="'+(d.preview_url ? esc(d.preview_url + authQuery(true)) : '')+'" aria-label="Preview" aria-pressed="false">'+PLAY_ICON+'</button>'
       : '';
+    const editBtn = isAudio
+      ? '<button type="button" class="btn btn-ghost btn-sm edit-tags-btn" data-task-id="'+esc(r.taskId||'')+'" data-index="'+esc(String(r.index||''))+'">Edit tags</button>'
+      : '';
     row.innerHTML =
       art +
       '<div class="pl-body">' +
@@ -1727,11 +1833,26 @@ function renderPlaylistResult(){
       '<div class="pl-actions">' +
         playBtn +
         '<a class="btn btn-ghost btn-sm save-btn" href="'+esc(url)+'" download="'+esc(name)+'">Save</a>' +
+        editBtn +
       '</div>';
     list.appendChild(row);
   }
   list.querySelectorAll('.pl-play').forEach(btn=>{
     btn.addEventListener('click', ()=>togglePlPreview(btn));
+  });
+  list.querySelectorAll('.edit-tags-btn').forEach(btn=>{
+    btn.addEventListener('click', async ()=>{
+      const taskId = btn.dataset.taskId;
+      if(!taskId) return;
+      try{
+        const res = await apiFetch('/api/task/'+taskId+'/candidates?session='+encodeURIComponent(getSession()), {method:'GET', headers:{'X-Requested-With':'XMLHttpRequest'}});
+        const data = await res.json();
+        if(!res.ok || data.error) throw new Error(data.error || ('Request failed ('+res.status+')'));
+        enterTags(taskId, data.candidates || [], true);
+      }catch(e){
+        showFeedback('Could not load tag candidates: '+((e&&e.message)||e), 'error');
+      }
+    });
   });
   box.classList.remove('hidden');
 }
@@ -1791,6 +1912,7 @@ async function homeReset(ev){
   $('plResultList').innerHTML = '';
   stopPlPreview();
   $('infoCard').classList.add('hidden');
+  $('prepareBtn').classList.add('hidden');
   $('playlistCard').classList.add('hidden');
   $('progressWrap').classList.add('hidden');
   $('dlContext').classList.add('hidden');
@@ -1800,7 +1922,7 @@ async function homeReset(ev){
   $('modeVideo').classList.add('active');
   $('modeAudio').classList.remove('active');
   $('retryBtn').classList.add('hidden');
-  setPrepareBtn(false, 'Start download');
+  setPrepareBtn(false, 'Prepare download');
   setScreen('screenImport');
 }
 
