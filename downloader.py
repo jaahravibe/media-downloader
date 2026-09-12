@@ -478,6 +478,7 @@ def build_download_command(url, format_spec, output_path, task_id=None,
         "-o", output_path,
         "--newline",
         "--progress",
+        "--write-info-json",
     ]
     if audio_convert and audio_convert.get("postprocessor") == "ffmpeg":
         out_ext = audio_convert.get("out_ext") or audio_convert.get("acodec")

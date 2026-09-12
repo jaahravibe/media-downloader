@@ -881,15 +881,38 @@ def _run_download(task_id, cmd, gen=0):
             size = os.path.getsize(real)
             ext = os.path.splitext(real)[1].lstrip(".")
             name = files[0].split("_", 1)[1] if "_" in files[0] else files[0]
+            meta = {}
+            for f in os.listdir(downloader.DOWNLOAD_DIR):
+                if f.startswith(task_id + "_") and f.endswith(".info.json"):
+                    try:
+                        with open(os.path.join(downloader.DOWNLOAD_DIR, f), "r", encoding="utf-8") as fh:
+                            j = json.load(fh)
+                        meta = {
+                            "thumbnail": str(j.get("thumbnail") or "").strip(),
+                            "title": str(j.get("title") or "").strip(),
+                            "creator": str(j.get("creator") or j.get("uploader") or "").strip(),
+                        }
+                        if not meta.get("thumbnail"):
+                            thumbs = j.get("thumbnails") or []
+                            if thumbs and isinstance(thumbs[-1], dict):
+                                meta["thumbnail"] = str(thumbs[-1].get("url") or "").strip()
+                    except Exception:
+                        meta = {}
+                    try:
+                        os.remove(os.path.join(downloader.DOWNLOAD_DIR, f))
+                    except OSError:
+                        pass
             with STATE_LOCK:
                 FILE_STATE[task_id] = True
                 tentry = TASKS.get(task_id) or {}
                 artwork = tentry.get("artwork") or ""
                 tags = tentry.get("tags")
                 tags_mode = tentry.get("tags_mode")
+                video_title = meta.get("title") or tentry.get("_title") or ""
+                video_creator = meta.get("creator") or tentry.get("_creator") or ""
                 FINISHED_META[task_id] = {
-                    "title": tentry.get("_title") or "",
-                    "creator": tentry.get("_creator") or "",
+                    "title": video_title,
+                    "creator": video_creator,
                 }
             notify(task_id, "ready", {
                 "status": "ready",
@@ -901,6 +924,9 @@ def _run_download(task_id, cmd, gen=0):
                 "cover": tentry.get("cover"),
                 "tags": tags,
                 "tags_mode": tags_mode,
+                "thumbnail": meta.get("thumbnail") or "",
+                "title": video_title,
+                "creator": video_creator,
                 "file_url": f"/api/file/{task_id}/{urllib.parse.quote(files[0], safe='')}",
                 "preview_url": f"/api/file/{task_id}/{urllib.parse.quote(files[0], safe='')}?inline=1",
             })
