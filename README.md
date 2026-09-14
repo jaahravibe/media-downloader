@@ -52,7 +52,9 @@ media-downloader/
 ├── app.py              # Flask server: UI + JSON API + download orchestration
 ├── downloader.py       # yt-dlp integration: metadata, format menu, command building
 ├── static/
-│   └── index.html      # The entire frontend (HTML + CSS + JS inline)
+│   ├── index.html      # Frontend markup
+│   ├── app.css         # Frontend styles
+│   └── app.js          # Frontend logic
 ├── downloads/          # Finished files land here (gitignored)
 ├── requirements.txt    # Python dependencies
 └── README.md
@@ -70,9 +72,9 @@ There are two moving parts that run at the same time:
    starts a background Python thread that shells out to `yt-dlp`. That thread parses
    yt-dlp's progress output and keeps a per-task status snapshot the frontend polls.
 
-The frontend JS is inline in `index.html` and talks to the server exclusively through
-`/api/*` endpoints. All state worth sharing lives on the server (tasks, progress,
-files).
+The frontend lives in the three files under `static/` and talks to the server
+exclusively through `/api/*` endpoints. All state worth sharing lives on the server
+(tasks, progress, files).
 
 ---
 
@@ -143,11 +145,12 @@ curl http://localhost:5000/api/ffmpeg
 
 - **Backend changes** (anything in `app.py` or `downloader.py`) require **restarting
   the server**.
-- **Frontend changes** (only `static/index.html`) require **only a browser refresh**.
+- **Frontend changes** (only the files under `static/`) require **only a browser refresh**.
 
-Why the difference? The server reads `index.html` from disk on every request, so the
-latest HTML is picked up immediately. The Python code, on the other hand, is already
-loaded into the running interpreter, so a restart is needed to pick up edits.
+Why the difference? The server reads the files under `static/` from disk on every
+request, so the latest HTML/CSS/JS is picked up immediately. The Python code, on the
+other hand, is already loaded into the running interpreter, so a restart is needed to
+pick up edits.
 
 ---
 
@@ -160,31 +163,27 @@ loaded into the running interpreter, so a restart is needed to pick up edits.
    that unfolds into the card grid (video resolutions or audio formats; audio options
    depend on what the site provides and whether ffmpeg is present).
 3. Tap a quality card to select it (the grid folds back up).
-4. Click **Start download**. For video, audio-without-ffmpeg, and playlists this
-   starts immediately. For **audio with ffmpeg** you land on the **optional tags
-   step** instead, where the download waits.
-5. **Song tags + album art (optional step):** the server looks the title up in the
-   iTunes/Deezer catalogs and shows a match carousel on the default **Match** tab.
-   Choose **Download with this match** to rip with the official tags (album art from
-   that match; the video thumbnail is the fallback), switch to the **Manual** tab to
-   type your own artist/title/album/year (cover: the video thumbnail or **your own
-   uploaded image**), use the **Skip** section to **Skip tags & download** the
-   video's own info and thumbnail, or **← Cancel** to return to the settings. When
-   nothing is found, a single preselected card using the video's uploader + title
-   is shown.
-6. A progress bar shows the current phase (extracting, downloading with %,
+4. Click **Start download**. Everything starts immediately — video, audio, and
+   playlists. Music files always begin with the video's own metadata + thumbnail;
+   there is no pre-download tag step anymore.
+5. A progress bar shows the current phase (extracting, downloading with %,
    processing/merging).
-7. When it finishes, a preview player appears. You can play it in the page or click
-   **Download** to save the file, **Fetch another**, or **← Back to settings**.
-8. **Playlists:** fetching a playlist shows a card with its entries and a button to
+6. When it finishes, a preview player appears. You can play it in the page or click
+   **Download** to save the file, **Fetch another**, or **← Back to settings**. For
+   audio, the result card (and each finished playlist row) also shows an **Edit
+   tags** button: it runs a fresh iTunes/Deezer catalog lookup against the stashed
+   title/uploader and opens the tag picker in *retag mode*, where you can apply an
+   official match, type your own tags (cover: the video thumbnail, official art, or
+   your own uploaded image), or keep the current tags.
+7. **Playlists:** fetching a playlist shows a card with its entries and a button to
    prepare them all.
-9. **Home** (button below the topbar, visible on every step except the fetch/import
+8. **Home** (button below the topbar, visible on every step except the fetch/import
    screen) deletes the session's prepared files, cancels any running task, and
    resets the page back to the start.
-10. While preparing/downloading, the Execute screen shows a **now-downloading**
-    context card (thumbnail + title + format) above the progress bar so you always
-    know which video is being processed; the card is replaced by the preview
-    player once the file is ready.
+9. While preparing/downloading, the Execute screen shows a **now-downloading**
+   context card (thumbnail + title + format) above the progress bar so you always
+   know which video is being processed; the card is replaced by the preview
+   player once the file is ready.
 
 Files are written to the `downloads/` directory, named like
 `<taskid>_<title>.<ext>`.
@@ -304,9 +303,9 @@ follows along.
 
 Each download runs in its own background thread, so requests are never blocked waiting
 on a slow download. The server runs with `threaded=True`, meaning Flask can handle
-concurrent HTTP requests in separate threads instead of serializing them. A semaphore
-caps how many downloads run at once (one set aside for merges/transcodes), so many
-users can't pile up unbounded yt-dlp subprocesses.
+concurrent HTTP requests in separate threads instead of serializing them. A bounded
+semaphore caps how many downloads run at once (two), so many users can't pile up
+unbounded yt-dlp subprocesses on a phone-class host.
 
 Files belong to whoever created them. Every browser sends a session token (generated
 once and kept in `localStorage`). When you prepare a new non-batch download, the
