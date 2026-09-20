@@ -13,7 +13,10 @@
 </div>
 
 <div class="wrap">
-  <button class="btn btn-ghost home-top hidden" id="homeBtn" onclick="homeReset(event)"><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 10.5 12 3l9 7.5V21h-5.5v-6h-7v6H3z"/></svg> Home — reset everything</button>
+  <div class="screen-nav hidden" id="screenNav">
+    <button class="btn btn-ghost btn-sm" id="backBtn" onclick="goBack()">← Back</button>
+    <button class="btn btn-ghost btn-sm" id="homeBtn" onclick="homeReset(event)"><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 10.5 12 3l9 7.5V21h-5.5v-6h-7v6H3z"/></svg> Home</button>
+  </div>
   <div class="feedback" id="feedback" aria-live="polite"></div>
 
   <!-- Step 1: Import -->
@@ -95,7 +98,11 @@
       <div class="tag-picker" id="tagPicker">
         <div class="tag-pane" id="paneMatch">
           <div class="tag-picker-title">Pick a match</div>
-          <div class="tag-picker-sub">A match looks up the official song tags and album art. Pick one and start, or write your own below.</div>
+          <div class="tag-picker-sub">Search the official catalogs for the right song tags and album art. If the video title doesn't hit, type your own query below.</div>
+          <div class="tag-search">
+            <input id="tagSearch" maxlength="300" autocomplete="off" spellcheck="false" placeholder="Artist or title to search…" aria-label="Search term for matching tags">
+            <button type="button" class="btn btn-ghost" id="tagSearchBtn" onclick="tagsSearch()">Search</button>
+          </div>
           <div class="tag-cands" id="tagCands"></div>
           <div class="art-seg" id="artSeg">
             <button type="button" data-art="album" onclick="setArtType('album')">Album art</button>
@@ -114,7 +121,13 @@
               <label>Artist<input id="mArtist" maxlength="120" autocomplete="off" placeholder="Artist"></label>
               <label>Title<input id="mTitle" maxlength="200" autocomplete="off" placeholder="Track title"></label>
               <label>Album<input id="mAlbum" maxlength="200" autocomplete="off" placeholder="Album"></label>
+              <label>Track #<input id="mTnum" maxlength="3" autocomplete="off" inputmode="numeric" placeholder="e.g. 5"></label>
+              <label>Track total<input id="mTtotal" maxlength="3" autocomplete="off" inputmode="numeric" placeholder="e.g. 12"></label>
+              <label>Disc #<input id="mDisc" maxlength="3" autocomplete="off" inputmode="numeric" placeholder="e.g. 1"></label>
+              <label>Disc total<input id="mDtotal" maxlength="3" autocomplete="off" inputmode="numeric" placeholder="e.g. 2"></label>
+              <label>Genre<input id="mGenre" maxlength="120" autocomplete="off" placeholder="Genre"></label>
               <label>Year<input id="mYear" maxlength="4" autocomplete="off" inputmode="numeric" placeholder="YYYY"></label>
+              <label>Comment<input id="mComment" maxlength="300" autocomplete="off" placeholder="Comment"></label>
             </div>
             <div class="manual-art">
               <div class="tag-picker-title">Cover art</div>
@@ -180,8 +193,6 @@
         <button class="btn btn-ghost" id="fetchAnotherBtn" onclick="goImport()">Fetch another</button>
       </div>
     </div>
-
-    <button class="btn btn-ghost btn-sm hidden" id="retryBtn" onclick="setScreen('screenConfigure')">← Back to settings</button>
   </section>
 </div>
 

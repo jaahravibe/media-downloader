@@ -257,12 +257,41 @@ def _embed_cover(task_id, media):
         return False
 
 
+def _num(v):
+    try:
+        return int(float(str(v or "").strip()))
+    except (TypeError, ValueError):
+        return None
+
+
+def _num_part(num, total):
+    """Format an ID3-style 'N' or 'N/M' part value (track/disc) or None."""
+    n = _num(num)
+    t = _num(total)
+    if n is None:
+        return None
+    return f"{n}/{t}" if t else str(n)
+
+
+def _m4a_pair(num, total):
+    """Return an MP4 (num, total) tuple for trkn/disk, or None if both blank."""
+    n = _num(num)
+    t = _num(total)
+    if n is None and t is None:
+        return None
+    return (n or 0, t or 0)
+
+
 def _write_tags(task_id, media, overrides, cover_path=None):
     """Write a finished media file's song tags (+ optional artwork) in place.
 
     Uses mutagen for every supported container (mp3 / m4a / mp4 / flac / ogg /
     opus) so it works whether or not ffmpeg is installed. Non-fatal by
     contract: any failure leaves the file untouched. Returns True on success.
+
+    Writes every provided field: artist, album, track (title), year plus
+    track_number/track_total, disc_number/disc_total, genre and comment.
+    flac/ogg/opus use spec-standard Vorbis names (TITLE/DATE/TRACKNUMBER/...).
 
     cover_path: path to artwork to embed, or the sentinel "\x00remove" to
     strip existing artwork, or None to leave artwork untouched.
@@ -273,38 +302,58 @@ def _write_tags(task_id, media, overrides, cover_path=None):
         return False
     remove_art = cover_path == "\x00remove"
     ext = os.path.splitext(media)[1].lstrip(".").lower()
-    year = _clean_tag(overrides.get("year") or "") if overrides else ""
     try:
         if ext in ("mp3",):
-            from mutagen.id3 import ID3, TIT2, TPE1, TALB, TYER, TDRC
+            from mutagen.id3 import (
+                ID3, TIT2, TPE1, TALB, TYER, TDRC,
+                TRCK, TPOS, TCON, COMM, APIC,
+            )
             try:
                 tags = ID3(media)
             except Exception:
-                from mutagen.id3 import ID3NoHeaderError
                 tags = ID3()
             if overrides:
-                for key, frame_cls in (("track", TIT2), ("artist", TPE1), ("album", TALB)):
+                for key, frame_cls in (
+                    ("track", TIT2), ("artist", TPE1), ("album", TALB),
+                    ("genre", TCON),
+                ):
                     v = _clean_tag(overrides.get(key) or "")
                     if v:
                         tags.delall(frame_cls.__name__)
                         tags.add(frame_cls(encoding=3, text=[v]))
+                trck = _num_part(overrides.get("track_number"),
+                                 overrides.get("track_total"))
+                if trck:
+                    tags.delall("TRCK")
+                    tags.add(TRCK(encoding=3, text=[trck]))
+                tpos = _num_part(overrides.get("disc_number"),
+                                 overrides.get("disc_total"))
+                if tpos:
+                    tags.delall("TPOS")
+                    tags.add(TPOS(encoding=3, text=[tpos]))
+                comment = _clean_tag(overrides.get("comment") or "")
+                if comment:
+                    tags.delall("COMM")
+                    tags.add(COMM(encoding=3, lang="eng", desc="",
+                                  text=[comment]))
+                year = _clean_tag(overrides.get("year") or "")
                 if year:
+                    tags.delall("TYER")
+                    tags.delall("TDRC")
                     if tags.version >= (2, 4):
-                        tags.delall("TDRC")
                         tags.add(TDRC(encoding=3, text=[year]))
                     else:
-                        tags.delall("TYER")
                         tags.add(TYER(encoding=3, text=[year]))
             if remove_art:
                 tags.delall("APIC")
             elif cover_path and os.path.exists(cover_path):
-                from mutagen.id3 import APIC
                 with open(cover_path, "rb") as f:
                     cover_bytes = f.read()
                 with open(cover_path, "rb") as f:
                     mime = "image/" + (downloader.sniff_image(f.read(32)) or "jpg")
                 tags.delall("APIC")
-                tags.add(APIC(encoding=3, mime=mime, type=3, desc="Cover", data=cover_bytes))
+                tags.add(APIC(encoding=3, mime=mime, type=3, desc="Cover",
+                              data=cover_bytes))
             tags.save(media)
         elif ext in ("m4a", "mp4", "m4v", "mov"):
             from mutagen.mp4 import MP4, MP4Cover
@@ -313,66 +362,84 @@ def _write_tags(task_id, media, overrides, cover_path=None):
                 "artist": "\xa9ART",
                 "album": "\xa9alb",
                 "track": "\xa9nam",
+                "genre": "\xa9gen",
+                "comment": "\xa9cmt",
             }
             for key, atom in mapping.items():
                 v = _clean_tag(overrides.get(key) or "")
                 if v:
                     tags[atom] = [v]
+            year = _clean_tag(overrides.get("year") or "")
             if year:
                 tags["\xa9day"] = [year]
+            trkn = _m4a_pair(overrides.get("track_number"),
+                             overrides.get("track_total"))
+            if trkn:
+                tags["trkn"] = [trkn]
+            disk = _m4a_pair(overrides.get("disc_number"),
+                             overrides.get("disc_total"))
+            if disk:
+                tags["disk"] = [disk]
             tags.pop("covr", None)
             if cover_path and os.path.exists(cover_path):
                 with open(cover_path, "rb") as f:
-                    tags["covr"] = [MP4Cover(f.read(), imageformat=MP4Cover.FORMAT_JPEG)]
+                    tags["covr"] = [MP4Cover(
+                        f.read(), imageformat=MP4Cover.FORMAT_JPEG)]
             tags.save(media)
-        elif ext == "flac":
-            from mutagen.flac import FLAC, Picture
-            tags = FLAC(media)
-            if overrides:
-                for key in ("artist", "album", "track", "year"):
-                    v = _clean_tag(overrides.get(key) or "")
-                    if v:
-                        tags[key] = [v]
-            tags.clear_pictures()
-            if cover_path and os.path.exists(cover_path):
-                with open(cover_path, "rb") as f:
-                    data = f.read()
-                pic = Picture()
-                pic.type = 3
-                pic.mime = "image/" + (downloader.sniff_image(data[:32]) or "jpg")
-                pic.data = data
-                w, h = _pic_dims(cover_path)
-                if w:
-                    pic.width, pic.height = w, h
-                tags.add_picture(pic)
-            tags.save(media)
-        elif ext in ("ogg", "opus"):
-            if ext == "opus":
+        elif ext in ("flac", "ogg", "opus"):
+            # Spec-standard Vorbis comment names. Internal dict keys use
+            # "track" for the song title and "year" for the release date;
+            # these map to TITLE and DATE respectively.
+            vorbis_keys = (
+                ("track", "title"), ("artist", "artist"), ("album", "album"),
+                ("year", "date"), ("track_number", "tracknumber"),
+                ("track_total", "tracktotal"), ("disc_number", "discnumber"),
+                ("disc_total", "disctotal"), ("genre", "genre"),
+                ("comment", "comment"),
+            )
+            if ext == "flac":
+                from mutagen.flac import FLAC, Picture
+                tags = FLAC(media)
+            elif ext == "opus":
                 from mutagen.oggopus import OggOpus
                 tags = OggOpus(media)
             else:
                 from mutagen.oggvorbis import OggVorbis
                 tags = OggVorbis(media)
             if overrides:
-                for key in ("artist", "album", "track", "year"):
+                for key, vk in vorbis_keys:
                     v = _clean_tag(overrides.get(key) or "")
                     if v:
-                        tags[key] = [v]
-            tags.pop("METADATA_BLOCK_PICTURE", None)
-            if cover_path and os.path.exists(cover_path):
-                from mutagen.flac import Picture
-                with open(cover_path, "rb") as f:
-                    data = f.read()
-                pic = Picture()
-                pic.type = 3
-                pic.mime = "image/" + (downloader.sniff_image(data[:32]) or "jpg")
-                pic.data = data
-                w, h = _pic_dims(cover_path)
-                if w:
-                    pic.width, pic.height = w, h
-                tags["METADATA_BLOCK_PICTURE"] = (
-                    base64.b64encode(pic.write()).decode("ascii")
-                )
+                        tags[vk] = [v]
+            if ext == "flac":
+                tags.clear_pictures()
+                if cover_path and os.path.exists(cover_path):
+                    with open(cover_path, "rb") as f:
+                        data = f.read()
+                    pic = Picture()
+                    pic.type = 3
+                    pic.mime = "image/" + (downloader.sniff_image(data[:32]) or "jpg")
+                    pic.data = data
+                    w, h = _pic_dims(cover_path)
+                    if w:
+                        pic.width, pic.height = w, h
+                    tags.add_picture(pic)
+            else:
+                tags.pop("METADATA_BLOCK_PICTURE", None)
+                if cover_path and os.path.exists(cover_path):
+                    from mutagen.flac import Picture
+                    with open(cover_path, "rb") as f:
+                        data = f.read()
+                    pic = Picture()
+                    pic.type = 3
+                    pic.mime = "image/" + (downloader.sniff_image(data[:32]) or "jpg")
+                    pic.data = data
+                    w, h = _pic_dims(cover_path)
+                    if w:
+                        pic.width, pic.height = w, h
+                    tags["METADATA_BLOCK_PICTURE"] = (
+                        base64.b64encode(pic.write()).decode("ascii")
+                    )
             tags.save(media)
         else:
             return False
@@ -1294,16 +1361,20 @@ def api_task_candidates(task_id):
         # Task finished before FINISHED_META existed (migrated code); try
         # to find a finished file and return an empty set gracefully.
         return jsonify({"candidates": []})
-    result = downloader.lookup_song_info(title, creator)
+    # Optional custom query: when the video title misses, the picker lets the
+    # user re-run the catalog lookup on their own search text.
+    q = (request.args.get("q") or "").strip()[:300]
+    query = q or title
+    result = downloader.lookup_song_info(query, creator)
     candidates = result.get("candidates") or []
     if not candidates:
         candidates = [{
-            "tags": {"artist": creator, "track": title},
-            "source": "Video title",
+            "tags": {"artist": creator, "track": query},
+            "source": "Search query" if q else "Video title",
             "score": 1.0,
             "artwork": "",
         }]
-    return jsonify({"candidates": _format_candidates(candidates)})
+    return jsonify({"candidates": _format_candidates(candidates), "query": query})
 
 
 @app.route("/api/task/<task_id>/retag", methods=["POST"])

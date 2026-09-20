@@ -246,6 +246,7 @@ def _itunes_candidates(title):
             "album": r.get("collectionName"),
             "track": r.get("trackName"),
             "track_number": r.get("trackNumber"),
+            "track_total": r.get("trackCount"),
             "year": str(r.get("releaseDate") or "")[:4],
         }
         out.append({
@@ -271,6 +272,7 @@ def _deezer_candidates(title):
             "album": album.get("title"),
             "track": r.get("title"),
             "track_number": r.get("track_position"),
+            "track_total": album.get("nb_tracks"),
             "year": str(album.get("release_date") or "")[:4],
         }
         out.append({

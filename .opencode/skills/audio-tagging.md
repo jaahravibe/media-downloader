@@ -75,7 +75,12 @@ Both fetch fresh candidates from `GET /api/task/<task_id>/candidates` (auth +
 `X-Requested-With` + owning-session + finished-task guards; `lookup_song_info`
 on the stashed `FINISHED_META[task_id]` `{title, creator}`; synth fallback card
 when catalogs miss) and open `#screenTags` in retag mode
-(`enterTags(taskId, cands, true)` sets `retagTaskId`). Submitting goes to
+(`enterTags(taskId, cands, true)` sets `retagTaskId`). The picker's Match pane
+has a **custom search** box pre-filled with the video title: `tagsSearch()` re-hits
+the same endpoint with `?q=<text>`, which re-runs the iTunes/Deezer lookup on that
+query (`query = q or title`). The fallback card then uses `track=search query`
+(`source: "Search query"`); the response carries the effective `query` so the box
+stays in sync. Submitting goes to
 `POST /api/task/<task_id>/retag` (same guards) instead of `/tags`, with the
 same body shape (`mode: candidate|manual|keep|skip`, `tags`, `art`); the
 response `{ok, changed, tags, tags_mode, artwork, cover}` re-renders the
@@ -85,8 +90,15 @@ my tags / Keep current tags"; `tagsSkip` in retag mode just closes the picker
 (no write); `tagsCancel` in retag mode does **not** DELETE the finished task —
 it returns to the result screen. Retag requires the pending/flags unchanged:
 it uses `_finished_media` (largest non-image, non-parts file) and `_write_tags`
-via **mutagen** (mp3/m4a/mp4/flac/ogg/opus), so it works with or without ffmpeg;
-cover `"none"` writes a `\x00remove` sentinel to strip embedded art; `"file"`
+via **mutagen** (mp3/m4a/mp4/flac/ogg/opus), so it works with or without ffmpeg.
+`_write_tags` writes **every provided field** — artist, album, track (title), year,
+track_number/track_total (mp3 `TRCK`, m4a `trkn`, Vorbis `tracknumber`/`tracktotal`),
+disc_number/disc_total (mp3 `TPOS`, m4a `disk`, Vorbis `discnumber`/`disctotal`),
+genre (`TCON`/`©gen`/`genre`), comment (`COMM`/`©cmt`/`comment`); flac/ogg/opus use
+spec-standard Vorbis names (title→`title`, year→`date`). Catalogs supply
+`track_total` too (iTunes `trackCount` / Deezer `nb_tracks`), and the Manual tab in
+the picker can set every field. cover `"none"` writes a `\x00remove` sentinel to
+strip embedded art; `"file"`
 reuses the canonical `downloads/<task_id>_cover.<ext>` (user upload), `"album"`
 fetches official art into the same transient slot. The ready payload stashes
 `FINISHED_META[task_id]` in `_run_download` (before `_drop_task`), popped by

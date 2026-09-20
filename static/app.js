@@ -23,7 +23,7 @@ function setScreen(s){
   ['screenImport','screenConfigure','screenTags','screenResult'].forEach(id=>{
     document.getElementById(id).classList.toggle('hidden', id!==s);
   });
-  $('homeBtn').classList.toggle('hidden', s==='screenImport');
+  $('screenNav').classList.toggle('hidden', s==='screenImport');
   if(s !== 'screenResult'){
     const v = $('previewVideo'), a = $('previewAudio');
     if(v) v.pause();
@@ -52,6 +52,12 @@ function goImport(){
   const u = $('url');
   u.focus();
   u.select();
+}
+function goBack(){
+  const cur = ['screenImport','screenConfigure','screenTags','screenResult'].find(id=>!document.getElementById(id).classList.contains('hidden'));
+  if(cur==='screenConfigure'){ goImport(); }
+  else if(cur==='screenTags'){ tagsCancel(); }
+  else { setScreen('screenConfigure'); }
 }
 
 /* ---------- Session (per-browser identity for isolation) ---------- */
@@ -164,6 +170,7 @@ async function pasteUrl(){
 function setFetching(on){
   $('fetchBtn').disabled = on;
   $('fetchBtn').innerHTML = on ? '<span class="spinner"></span> Loading' : 'Fetch info';
+  $('fetchBtn').setAttribute('aria-busy', on ? 'true' : 'false');
   $('url').disabled = on;
 }
 async function fetchInfo(){
@@ -351,7 +358,8 @@ function setBusy(on){
 function setPrepareBtn(on, txt){
   $('prepareBtn').disabled = on;
   $('prepareBtn').innerHTML = on ? '<span class="spinner"></span> '+txt : 'Prepare download';
-  if(on) $('retryBtn').classList.add('hidden');
+  $('prepareBtn').setAttribute('aria-busy', on ? 'true' : 'false');
+  if(on) $('backBtn').classList.add('hidden');
   setBusy(on);
 }
 async function prepareVideo(){
@@ -519,14 +527,27 @@ function refreshResultAfterTags(){
 }
 
 /* ---------- Optional tags & art step (audio with ffmpeg) ---------- */
-function setTagsBusy(on){
-  ['tagStartBtn','tagSkipBtn','tagCancelBtn','manualSubmitBtn','tabMatch','tabManual'].forEach(id=>{ $(id).disabled = on; });
+function setTagsBusy(on, applying){
+  ['tagStartBtn','tagSkipBtn','tagCancelBtn','manualSubmitBtn','tabMatch','tabManual','tagSearch','tagSearchBtn'].forEach(id=>{ $(id).disabled = on; });
   document.querySelectorAll('#manualArtSeg button').forEach(b=>{ b.disabled = on; });
   $('coverFile').disabled = on;
+  $('tagCard').setAttribute('aria-busy', on ? 'true' : 'false');
+  $('tagSearchBtn').innerHTML = on ? '<span class="spinner"></span> Searching' : 'Search';
+  if(on && applying){
+    const busy = '<span class="spinner"></span> '+(retagTaskId ? 'Applying tags…' : 'Starting…');
+    $('tagStartBtn').innerHTML = busy;
+    $('manualSubmitBtn').innerHTML = busy;
+  }
 }
-function enterTags(taskId, cands, retag){
+function enterTags(taskId, cands, retag, query){
   pendingTaskId = taskId;
   retagTaskId = retag ? taskId : null;
+  $('tagSearch').value = query || '';
+  $('tagSearch').disabled = false;
+  $('tagSearchBtn').disabled = false;
+  $('tagSearch').onkeydown = (e)=>{
+    if(e.key === 'Enter'){ e.preventDefault(); tagsSearch(); }
+  };
   selArt = retag ? {type:'album', url:''} : {type:'video', url:''};
   $('coverFile').value = '';
   $('coverPreview').classList.add('hidden');
@@ -557,7 +578,7 @@ async function editTagsForResult(){
     const res = await apiFetch('/api/task/'+taskId+'/candidates?session='+encodeURIComponent(getSession()), {method:'GET', headers:{'X-Requested-With':'XMLHttpRequest'}});
     const data = await res.json();
     if(!res.ok || data.error) throw new Error(data.error || ('Request failed ('+res.status+')'));
-    enterTags(taskId, data.candidates || [], true);
+    enterTags(taskId, data.candidates || [], true, data.query);
   }catch(e){
     showFeedback('Could not load tag candidates: '+((e&&e.message)||e), 'error');
   }
@@ -566,9 +587,30 @@ async function tagsStart(){
   const taskId = pendingTaskId;
   if(!taskId) return;
   if(!tagCands.length){ showFeedback('No song matches available.', 'error'); return; }
-  setTagsBusy(true);
+  setTagsBusy(true, true);
   const ok = await startWithSelection(taskId, tagCands);
   if(!ok) setTagsBusy(false);
+}
+async function tagsSearch(){
+  const taskId = pendingTaskId;
+  const input = $('tagSearch');
+  if(!taskId) return;
+  setTagsBusy(true);
+  const q = (input.value || '').trim();
+  try{
+    const path = '/api/task/'+taskId+'/candidates?session='+encodeURIComponent(getSession())
+      + (q ? '&q='+encodeURIComponent(q) : '');
+    const res = await apiFetch(path, {method:'GET', headers:{'X-Requested-With':'XMLHttpRequest'}});
+    const data = await res.json();
+    if(!res.ok || data.error) throw new Error(data.error || ('Request failed ('+res.status+')'));
+    input.value = data.query || q || '';
+    openPicker(data.candidates || []);
+    showFeedback('Search results for "' + (data.query || '') + '".', 'ok');
+  }catch(e){
+    showFeedback('Search failed: '+((e&&e.message)||e), 'error');
+  }finally{
+    setTagsBusy(false);
+  }
 }
 async function tagsSkip(){
   const taskId = pendingTaskId;
@@ -578,7 +620,7 @@ async function tagsSkip(){
     refreshResultAfterTags();
     return;
   }
-  setTagsBusy(true);
+  setTagsBusy(true, true);
   const ok = await postAndListen(taskId, {mode:'keep'});
   if(!ok) setTagsBusy(false);
 }
@@ -622,7 +664,13 @@ function tagPane(which){
     $('mArtist').value = c.artist || '';
     $('mTitle').value = c.track || '';
     $('mAlbum').value = c.album || '';
+    $('mTnum').value = c.track_number || '';
+    $('mTtotal').value = c.track_total || '';
+    $('mDisc').value = c.disc_number || '';
+    $('mDtotal').value = c.disc_total || '';
+    $('mGenre').value = c.genre || '';
     $('mYear').value = c.year || '';
+    $('mComment').value = c.comment || '';
     if(selArt.type === 'album' || selArt.type === 'none'){
       selArt = {type:'video', url:''};
     }
@@ -671,7 +719,7 @@ async function uploadCover(){
     syncManualArt();
     return;
   }
-  st.textContent = 'Uploading…';
+  st.innerHTML = '<span class="spinner"></span>Uploading…';
   st.className = 'upload-status';
   const fd = new FormData();
   fd.append('file', f);
@@ -701,18 +749,36 @@ async function tagsManualSubmit(){
   const artist = $('mArtist').value.trim();
   const track  = $('mTitle').value.trim();
   const album  = $('mAlbum').value.trim();
+  const tnum   = $('mTnum').value.trim();
+  const ttotal = $('mTtotal').value.trim();
+  const disc   = $('mDisc').value.trim();
+  const dtotal = $('mDtotal').value.trim();
+  const genre  = $('mGenre').value.trim();
   const year   = $('mYear').value.trim();
-  if(!artist && !track && !album && !year){
-    showFeedback('Enter at least one field (artist, title, album or year).', 'error');
+  const comment = $('mComment').value.trim();
+  const hasAny = artist || track || album || tnum || ttotal || disc || dtotal || genre || year || comment;
+  if(!hasAny){
+    showFeedback('Enter at least one field (artist, title, album, track #, disc #, genre, year or comment).', 'error');
     return;
   }
+  const numRe = /^\d{1,3}$/;
+  if(tnum && !numRe.test(tnum)){ showFeedback('Track # must be a number (e.g. 5).', 'error'); return; }
+  if(ttotal && !numRe.test(ttotal)){ showFeedback('Track total must be a number (e.g. 12).', 'error'); return; }
+  if(disc && !numRe.test(disc)){ showFeedback('Disc # must be a number (e.g. 1).', 'error'); return; }
+  if(dtotal && !numRe.test(dtotal)){ showFeedback('Disc total must be a number (e.g. 2).', 'error'); return; }
   if(artist) tags.artist = artist;
   if(track) tags.track = track;
   if(album) tags.album = album;
+  if(tnum) tags.track_number = tnum;
+  if(ttotal) tags.track_total = ttotal;
+  if(disc) tags.disc_number = disc;
+  if(dtotal) tags.disc_total = dtotal;
+  if(genre) tags.genre = genre;
   if(year){
     if(!/^\d{4}$/.test(year)){ showFeedback('Year must be 4 digits (e.g. 2013).', 'error'); return; }
     tags.year = year;
   }
+  if(comment) tags.comment = comment;
   const art = selArt;
   if(art.type === 'album'){
     const c = tagCands[selCand] || {};
@@ -721,7 +787,7 @@ async function tagsManualSubmit(){
     showFeedback('Upload your cover image first, or choose Video thumb.', 'error');
     return;
   }
-  setTagsBusy(true);
+  setTagsBusy(true, true);
   const ok = retagTaskId
     ? await applyRetag(taskId, {mode:'manual', tags: tags, art: art})
     : await postAndListen(taskId, {mode:'manual', tags: tags, art: art});
@@ -750,7 +816,7 @@ function listenProgress(taskId){
     fill.className = 'progress-fill';
     text.textContent = msg;
     text.className = 'progress-text error';
-    $('retryBtn').classList.remove('hidden');
+    $('backBtn').classList.remove('hidden');
     setPrepareBtn(false, 'Prepare download');
     $('tagCard').classList.add('hidden');
   }
@@ -930,7 +996,7 @@ function showReady(d){
   setScreen('screenResult');
   $('dlContext').classList.add('hidden');
   $('progressWrap').classList.add('hidden');
-  $('retryBtn').classList.remove('hidden');
+  $('backBtn').classList.remove('hidden');
   $('resultArea').classList.remove('hidden');
   const fileName = d.display_name || d.filename || 'file';
   const ext = (d.ext || '').toLowerCase();
@@ -1379,7 +1445,7 @@ function renderPlaylistResult(){
         const res = await apiFetch('/api/task/'+taskId+'/candidates?session='+encodeURIComponent(getSession()), {method:'GET', headers:{'X-Requested-With':'XMLHttpRequest'}});
         const data = await res.json();
         if(!res.ok || data.error) throw new Error(data.error || ('Request failed ('+res.status+')'));
-        enterTags(taskId, data.candidates || [], true);
+        enterTags(taskId, data.candidates || [], true, data.query);
       }catch(e){
         showFeedback('Could not load tag candidates: '+((e&&e.message)||e), 'error');
       }
@@ -1452,7 +1518,7 @@ async function homeReset(ev){
   showFeedback('');
   $('modeVideo').classList.add('active');
   $('modeAudio').classList.remove('active');
-  $('retryBtn').classList.add('hidden');
+  $('backBtn').classList.add('hidden');
   setPrepareBtn(false, 'Prepare download');
   setScreen('screenImport');
 }

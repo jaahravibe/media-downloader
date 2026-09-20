@@ -212,15 +212,20 @@ Files are written to the `downloads/` directory, named like
   metadata set + album-art choice (`{mode: candidate|keep|skip|manual, tags, art:
   {type: album|file|video|none, url}}`) and starts the download. Only exercised by
   the old deferred flow; the current UI routes its picker through `/retag` instead.
-- `GET /api/task/<task_id>/candidates?session=...` — returns a fresh ranked
+- `GET /api/task/<task_id>/candidates?session=...&q=...` — returns a fresh ranked
   candidate list for a **finished** audio task (Auth + `X-Requested-With` +
   owning-session + finished-task guards), built live from the stashed
-  `FINISHED_META[task_id]` `{title, creator}`. Used by the after-download result
-  picker.
+  `FINISHED_META[task_id]` `{title, creator}`. Optional `q` overrides the video
+  title as the catalog search term (the picker's custom search); the response
+  echoes back the effective `query` for prefilling. Used by the after-download
+  result picker.
 - `POST /api/task/<task_id>/retag` — the after-download tag editor. Same body shape
   and guards as `/tags`, but it targets the **finished file**: rewrites the
   embedded tags + artwork in place via mutagen (no re-download, filename
-  unchanged). Returns `{ok, changed, tags, tags_mode, artwork, cover}` so the UI
+  unchanged). All provided fields are written — artist, album, track (title),
+  year, track/disc number+total, genre, comment (container-standard frames/atoms;
+  flac/ogg/opus use spec Vorbis names). Returns
+  `{ok, changed, tags, tags_mode, artwork, cover}` so the UI
   re-renders the result card or playlist row. `mode: "skip"` leaves everything
   untouched; `mode: "keep"` with no tags/art change is a no-op; art `type: "none"`
   strips embedded artwork (`\x00remove` sentinel); `"file"` reuses the uploaded
